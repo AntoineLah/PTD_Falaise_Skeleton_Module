@@ -4,6 +4,7 @@
 #include <datatools/utils.h>
 #include <bayeux/geomtools/blur_spot.h>
 
+#include <falaise/snemo/datamodels/event_header.h>
 
 #include <falaise/snemo/datamodels/particle_track_data.h>
 #include <falaise/snemo/datamodels/tracker_trajectory_solution.h>
@@ -26,6 +27,16 @@
 #include <falaise/snemo/datamodels/geomid_utils.h>
 #include <falaise/snemo/datamodels/timestamp.h>
 #include <falaise/snemo/datamodels/track_fitting_utils.h>
+#include <bayeux/geomtools/geom_info.h>
+#include <falaise/snemo/geometry/calo_locator.h>
+#include <falaise/snemo/geometry/gveto_locator.h>
+#include <falaise/snemo/geometry/locator_plugin.h>
+#include <falaise/snemo/geometry/xcalo_locator.h>
+#include <geomtools/geometry_service.h>
+
+#include <datatools/service_manager.h>
+#include <geomtools/manager.h>
+#include <bayeux/mctools/base_step_hit.h>
 
 #include "TFile.h"
 #include "TTree.h"
@@ -45,7 +56,6 @@
 #include <limits>
 #include <numeric>
 using namespace std;
-
 
 
 
@@ -206,18 +216,20 @@ public:
 
   // Initialisation function
   virtual void initialize (const datatools::properties &,
-                           datatools::service_manager &,
+                           datatools::service_manager & serviceManager,
 			   dpp::module_handle_dict_type &);
 
   // Event processing function
   dpp::chain_module::process_status process (datatools::things & event);
   
 private:
-  bool DEBUG = true;
-  bool saving_file = false;
+  bool DEBUG = false;
+  bool saving_file = true;
   int  ptd_event_counter;
   int event_number = 0;
-  bool ptd_details, ttd_details, sd_calo_details, sd_tracker_details, pcd_details, udd_details, cd_details; 
+  bool ptd_details, ttd_details, sd_calo_details, sd_tracker_details, pcd_details, udd_details, cd_details, tcd_details;
+  const geomtools::manager* _geo_manager_ = nullptr;
+ 
   vector<double> energy_gamma, energy_elec, corrected_energy_elec, time_elec;
   //vector<double> vertex_start_x, vertex_start_y, vertex_start_z, vertex_end_x, vertex_end_y, vertex_end_z, vertex_gamma;
 
@@ -284,7 +296,7 @@ vector<vector<double>> vertex_is_on_gamma_veto_per_elec_cluster; // BOOL
 vector<vector<double>> vertex_is_on_wire_per_elec_cluster; // BOOL 
 vector<vector<double>> vertex_is_in_gas_per_elec_cluster; // BOOL 
 vector<vector<double>> vertex_is_on_source_gap_per_elec_cluster; // BOOL 
-
+vector<int> elec_is_associated_with_track;
 
 // ELEC CROSSING : 
 
@@ -396,6 +408,7 @@ vector<vector<double>> vertex_is_on_source_gap_per_elec_cluster; // BOOL
 	vector<double> fit_elec_index_for_each_elec_crossing;
 	std::vector<bool> elec_used ; // ??
 	std::vector<bool> und_used ; // ?? ICI comme ça ? 
+
   // for UNDEFINED CLUSTERS (electron or alpha candidates)
 
   
@@ -449,7 +462,7 @@ vector<vector<double>> vertex_is_on_source_gap_per_elec_cluster; // BOOL
 	vector<vector<double>> vertex_is_on_source_gap_per_UND_cluster; // BOOL
 
 	vector<int>nb_fit_solution_per_UND_cluster;
-  	   
+  	
   
   // OM Isolated (gamma) part : 
   
@@ -462,7 +475,7 @@ vector<vector<double>> vertex_is_on_source_gap_per_elec_cluster; // BOOL
   
   vector<int> unassociated_cells_num;
   vector<double> anode_unassociated_cells, top_cathodes_of_unassociated_cells, bottom_cathodes_of_unassociated_cells, z_of_unassociated_cells; 
-  
+  vector<double> x_calo_gamma, y_calo_gamma, z_calo_gamma;
   // Tag
   bool evt_isolated_calo;
   bool tracks_with_associated_calo;
@@ -485,7 +498,7 @@ falaise_skeleton_module_ptd::falaise_skeleton_module_ptd()
 {
   std::cout << "falaise_skeleton_module_ptd::falaise_skeleton_module_ptd() called" << std::endl;
   if(saving_file){
-  	save_file = new TFile("ptd_1166_WITH_ELEC_UND_AMBIGUITY_CHECKED.root", "RECREATE");
+  	save_file = new TFile("PTD_extracted.root", "RECREATE");
   	tree = new TTree("particules", "PTD data informations extracted ==> for second analysis");
 
   
@@ -507,8 +520,10 @@ falaise_skeleton_module_ptd::falaise_skeleton_module_ptd()
   	tree->Branch("evt_isolated_calo",                 &evt_isolated_calo);
   	tree->Branch("isolated_calo_low_threshold_only",  &isolated_calo_low_threshold_only);
   	tree->Branch("isolated_calo_high_threshold",      &isolated_calo_high_threshold);
-
-
+	
+	tree->Branch("x_calo_gamma", 					  &x_calo_gamma);
+	tree->Branch("y_calo_gamma", 					  &y_calo_gamma);
+	tree->Branch("z_calo_gamma", 					  &z_calo_gamma);
 
 
   	//tree->Branch("", &);
@@ -568,7 +583,7 @@ falaise_skeleton_module_ptd::falaise_skeleton_module_ptd()
 	tree->Branch("x_is_on_source_gap", &x_is_on_source_gap);
 	tree->Branch("y_is_on_source_gap", &y_is_on_source_gap);
 	tree->Branch("z_is_on_source_gap", &z_is_on_source_gap);
-	  
+	
 	tree->Branch("xy_distance_from_reference_source_plane", &xy_distance_from_reference_source_plane);
 	tree->Branch("xy_distance_from_source_foil", &xy_distance_from_source_foil);
 	tree->Branch("xy_distance_from_main_calorimeter", &xy_distance_from_main_calorimeter);
@@ -577,7 +592,9 @@ falaise_skeleton_module_ptd::falaise_skeleton_module_ptd()
 	tree->Branch("xy_distance_from_wire", &xy_distance_from_wire);
 	tree->Branch("xy_distance_from_gas", &xy_distance_from_gas);
 	tree->Branch("xy_distance_from_source_gap", &xy_distance_from_source_gap);
-	  
+	
+	
+	
 	tree->Branch("xyz_distance_from_reference_source_plane", &xyz_distance_from_reference_source_plane);
 	tree->Branch("xyz_distance_from_source_foil", &xyz_distance_from_source_foil);
 	tree->Branch("xyz_distance_from_main_calorimeter", &xyz_distance_from_main_calorimeter);
@@ -587,14 +604,14 @@ falaise_skeleton_module_ptd::falaise_skeleton_module_ptd()
 	tree->Branch("xyz_distance_from_gas", &xyz_distance_from_gas);
 	tree->Branch("xyz_distance_from_source_gap", &xyz_distance_from_source_gap);
 
-	tree->Branch("elec_is_on_reference_source_plane", &elec_is_on_reference_source_plane);
-	tree->Branch("elec_is_on_source_foil", &elec_is_on_source_foil);
-	tree->Branch("elec_is_on_main_calorimeter", &elec_is_on_main_calorimeter);
-	tree->Branch("elec_is_on_x_calorimeter", &elec_is_on_x_calorimeter);
-	tree->Branch("elec_is_on_gamma_veto", &elec_is_on_gamma_veto);
-	tree->Branch("elec_is_on_wire", &elec_is_on_wire);
-	tree->Branch("elec_is_in_gas", &elec_is_in_gas);
-	tree->Branch("elec_is_on_source_gap", &elec_is_on_source_gap);
+	//tree->Branch("elec_is_on_reference_source_plane", &elec_is_on_reference_source_plane);
+	//tree->Branch("elec_is_on_source_foil", &elec_is_on_source_foil);
+	//tree->Branch("elec_is_on_main_calorimeter", &elec_is_on_main_calorimeter);
+	//tree->Branch("elec_is_on_x_calorimeter", &elec_is_on_x_calorimeter);
+	//tree->Branch("elec_is_on_gamma_veto", &elec_is_on_gamma_veto);
+	//tree->Branch("elec_is_on_wire", &elec_is_on_wire);
+	//tree->Branch("elec_is_in_gas", &elec_is_in_gas);
+	//tree->Branch("elec_is_on_source_gap", &elec_is_on_source_gap);
 
 	tree->Branch("vertex_is_on_reference_source_plane_per_elec_cluster", &vertex_is_on_reference_source_plane_per_elec_cluster);
 	tree->Branch("vertex_is_on_source_foil_per_elec_cluster", &vertex_is_on_source_foil_per_elec_cluster);
@@ -604,8 +621,20 @@ falaise_skeleton_module_ptd::falaise_skeleton_module_ptd()
 	tree->Branch("vertex_is_on_wire_per_elec_cluster", &vertex_is_on_wire_per_elec_cluster);
 	tree->Branch("vertex_is_in_gas_per_elec_cluster", &vertex_is_in_gas_per_elec_cluster);
 	tree->Branch("vertex_is_on_source_gap_per_elec_cluster", &vertex_is_on_source_gap_per_elec_cluster);
-  
 
+
+	
+	tree->Branch("distance_elec_UND_per_elec_crossing", &distance_elec_UND_per_elec_crossing);
+	tree->Branch("nb_elec_crossing", &nb_of_elec_crossing);
+	tree->Branch("delta_t_cells_of_UND_per_elec_crossing", &delta_t_cells_of_UND_per_elec_crossing);
+	tree->Branch("delta_t_cells_of_elec_per_elec_crossing", &delta_t_cells_of_elec_per_elec_crossing);
+	tree->Branch("elec_used", &elec_used);
+	tree->Branch("und_used", &und_used);
+	tree->Branch("nb_of_cell_per_elec_crossing", &nb_of_cell_per_elec_crossing);
+	tree->Branch("ID_cluster_per_elec_crossing", &ID_cluster_per_elec_crossing);
+	tree->Branch("ID_cluster_UND_per_elec_crossing", &ID_cluster_UND_per_elec_crossing);
+
+	tree->Branch("elec_is_associated_with_track", &elec_is_associated_with_track);
   	//UNDIFINED TRACKS : 
   	tree->Branch("tracks_without_associated_calo", &tracks_without_associated_calo);
   	tree->Branch("nb_of_UND_candidates", &nb_of_UND_candidates);
@@ -691,7 +720,7 @@ falaise_skeleton_module_ptd::~falaise_skeleton_module_ptd()
 }
 
 
-void falaise_skeleton_module_ptd::initialize (const datatools::properties & module_properties, datatools::service_manager &, dpp::module_handle_dict_type &)
+void falaise_skeleton_module_ptd::initialize (const datatools::properties & module_properties, datatools::service_manager & serviceManager, dpp::module_handle_dict_type &)
 {
 	std::cout << "falaise_skeleton_module_ptd::initialize() called" << std::endl;
 
@@ -713,18 +742,22 @@ void falaise_skeleton_module_ptd::initialize (const datatools::properties & modu
     	sd_calo_details = module_properties.fetch_boolean("calo_details");
   	else sd_calo_details = false;
 
-	  if(module_properties.has_key("tracker_details"))
-	    sd_tracker_details = module_properties.fetch_boolean("tracker_details");
-	  else sd_tracker_details = false;
+	if(module_properties.has_key("tracker_details"))
+		sd_tracker_details = module_properties.fetch_boolean("tracker_details");
+	else sd_tracker_details = false;
 
-	  if(module_properties.has_key("udd_details"))
-	    udd_details = module_properties.fetch_boolean("udd_details");
-	  else udd_details = false;
+	if(module_properties.has_key("udd_details"))
+		udd_details = module_properties.fetch_boolean("udd_details");
+	else udd_details = false;
 
-	  if(module_properties.has_key("cd_details"))
-	  	cd_details = module_properties.fetch_boolean("cd_details");
-	  else cd_details = false;
+	if(module_properties.has_key("cd_details"))
+		cd_details = module_properties.fetch_boolean("cd_details");
+	else cd_details = false;
+	if(module_properties.has_key("tcd_details"))
+		tcd_details = module_properties.fetch_boolean("tcd_details");
+	else tcd_details = false;
 
+  	_geo_manager_ = &serviceManager.get<geomtools::geometry_service>("geometry").get_geom_manager();
   
   	this->_set_initialized(true);
 }
@@ -750,6 +783,9 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 	if(!event.has("TTD")){
 		return dpp::base_module::PROCESS_SUCCESS;
 	}
+	if(!event.has("TCD")){
+		return dpp::base_module::PROCESS_SUCCESS;
+	}
   
   	// Retrieve the PTD bank  
   	const snemo::datamodel::particle_track_data & PTD = event.get<snemo::datamodel::particle_track_data>("PTD");
@@ -768,6 +804,10 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
   	const snemo::datamodel::unified_digitized_data & UDD = event.get<snemo::datamodel::unified_digitized_data>("UDD");
 
 	const snemo::datamodel::tracker_trajectory_data & TTD = event.get<snemo::datamodel::tracker_trajectory_data>("TTD");
+
+	const snemo::datamodel::tracker_clustering_data & TCD = event.get<snemo::datamodel::tracker_clustering_data>("TCD");
+	
+
 
   	// Enregistrer les électrons
   	// Enregistrer les traces sans OMs
@@ -797,6 +837,9 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
   	sigma_isolated_calo_amplitude.clear();
   	isolated_calo_low_threshold_only.clear();
   	isolated_calo_high_threshold.clear();
+	x_calo_gamma.clear();
+	y_calo_gamma.clear();
+	z_calo_gamma.clear();
 
   	// ELEC CANDIDATE
   	cell_num_per_elec_cluster.clear();
@@ -1051,8 +1094,43 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 
 	//std::cout<<"nb particles in the current event : "<<PTD.particles().size()<<std::endl;
 	if (ptd_details)
-    {
-      
+    {		
+		// MANU's Code to compute mean anodic time per cluster ==> Need to select only once without fit and to check if there are associated with elec/UND candidate. 
+		const snemo::datamodel::tracker_clustering_data & TCD = event.get<snemo::datamodel::tracker_clustering_data>("TCD");
+  		const snemo::datamodel::tracker_clustering_solution & tcd_solution = TCD.get_default();
+		std::vector<double> cluster_mean_anodic_time;
+  		cluster_mean_anodic_time.reserve(tcd_solution.get_clusters().size());
+		std::vector<int> cluster_id;
+		cluster_id.reserve(tcd_solution.get_clusters().size());
+
+		double anodic_time_sum = 0.;
+		for(const auto & cluster : tcd_solution.get_clusters()){
+
+			anodic_time_sum = 0.;
+			for (const datatools::handle<snemo::datamodel::calibrated_tracker_hit> & tracker_hit : cluster->hits()) {
+
+      			const int pcd_index = tracker_hit->get_auxiliaries().fetch_integer("pCD.parent");
+      			anodic_time_sum += PCD.tracker_hits()[pcd_index]->get_anodic_time()/CLHEP::second;
+
+    	} // for (tracker_hit)                                                                                                                                    
+		cluster_id.push_back(cluster->get_cluster_id());
+    	cluster_mean_anodic_time.push_back(anodic_time_sum / cluster->hits().size());
+		}
+
+		for(int i = 0; i <cluster_mean_anodic_time.size(); i++){
+			std::cout<<"cluster_mean_anodic_time.at(i) = "<< std::setprecision(25)<< cluster_mean_anodic_time.at(i)<< " cluster id = "<<cluster_id.at(i)<<std::endl;
+		}
+		//for (const datatools::handle<snemo::datamodel::calibrated_tracker_hit> & tracker_hit : cluster->hits()) {
+		//
+      	//	const int pcd_index = tracker_hit->get_auxiliaries().fetch_integer("PCD.parent");
+		//	std::cout<<"pcd_index = "<<pcd_index<<std::endl;
+      	//	
+		//	anodic_time_sum += PCD.tracker_hits()[pcd_index]->get_anodic_time();
+    	//
+		//} // for (tracker_hit)                                                                                                                                    
+    	//cluster_mean_anodic_time.push_back(anodic_time_sum / cluster->hits().size());
+
+
     	// Gammas
 
     	if(PTD.hasIsolatedCalorimeters()){
@@ -1075,6 +1153,29 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 			  	string OM_label = snemo::datamodel::om_label(OM_hit_isolated->get_geom_id());
 			  	isolated_calo_type.push_back(OM_label[0]);
 			  	//std::cout<<"OM LABEL FROM STRING = "<< OM_label[0]<<std::endl; // ==> Return string "M", "X" or "G" for Main, X or Gamma Veto to determine the OM type  
+				
+				const geomtools::manager & geoMgr = *_geo_manager_;
+				
+				uint32_t moduleNumber = 0;
+				
+				int type = OM_hit_isolated->get_geom_id().get_type();
+				geomtools::vector_3d pos;
+
+				if(type == 1302){
+	    		  snemo::geometry::calo_locator CL(moduleNumber, geoMgr,{});
+	    		  pos = CL.getBlockPosition(OM_hit_isolated->get_geom_id());
+	    		}
+	    		else if(type == 1232){
+	    		  snemo::geometry::xcalo_locator CL(moduleNumber, geoMgr,{});
+	    		  pos = CL.getBlockPosition(OM_hit_isolated->get_geom_id());
+	    		}
+	    		else if(type == 1251){
+	    		  snemo::geometry::gveto_locator CL(moduleNumber, geoMgr,{});
+	    		  pos = CL.getBlockPosition(OM_hit_isolated->get_geom_id());
+	    		}
+				x_calo_gamma.push_back(pos.x()/CLHEP::mm);
+				y_calo_gamma.push_back(pos.y()/CLHEP::mm);
+				z_calo_gamma.push_back(pos.z()/CLHEP::mm);
 
 			}
 			// Add Data from pCD bank
@@ -1162,7 +1263,7 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 					std::cout<<"\n\n";
 					
 					for(const datatools::handle<snemo::datamodel::vertex> & vertex : particle->get_vertices()){
-
+						
 						if(vertex->is_on_reference_source_plane()){
 							std::cout<<"is_on_reference_source_plane"<<std::endl;
 							std::cout<<"	get_distance_xy() = "<<vertex->get_distance_xy()/CLHEP::mm<<std::endl;
@@ -1328,12 +1429,22 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 	    			nb_OM=0;
 					
 					if(particle->has_trajectory()){
-						x_start_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[0]});
-						y_start_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[1]});
-						z_start_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[2]});
-						x_end_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[0]});
-						y_end_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[1]});
-						z_end_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[2]});
+						if(cell_num_of_current_track.front()< 1017){
+							x_start_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[0]});
+							y_start_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[1]});
+							z_start_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[2]});
+							x_end_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[0]});
+							y_end_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[1]});
+							z_end_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[2]});
+						}
+						else if(cell_num_of_current_track.front()>= 1017){
+							x_start_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[0]});
+							y_start_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[1]});
+							z_start_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[2]});
+							x_end_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[0]});
+							y_end_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[1]});
+							z_end_per_elec_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[2]});
+						}
 					}
 					else{
 						x_start_per_elec_cluster.push_back({std::nan("")});
@@ -1345,7 +1456,6 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 					}
 					
 					// Lopping on all extrapolate vertexes and save it ! 
-
 
 					//std::cout<<"ICI ? "<<std::endl;
 					if(particle->has_trajectory() && particle->has_vertices()){
@@ -2034,12 +2144,22 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 					cell_num_of_current_track.clear();
 
 					if(particle->has_trajectory()){
-						x_start_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[0]});
-						y_start_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[1]});
-						z_start_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[2]});
-						x_end_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[0]});
-						y_end_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[1]});
-						z_end_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[2]});
+						if(cell_num_of_current_track.front()< 1017){
+							x_start_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[0]});
+							y_start_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[1]});
+							z_start_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[2]});
+							x_end_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[0]});
+							y_end_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[1]});
+							z_end_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[2]});
+						}
+						else if(cell_num_of_current_track.front()>= 1017){ // ADD 17 september 2025, same for elec cluster... 
+							x_start_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[0]});
+							y_start_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[1]});
+							z_start_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_last()[2]});
+							x_end_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[0]});
+							y_end_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[1]});
+							z_end_per_UND_cluster.push_back({particle->get_trajectory_handle()->get_pattern().get_first()[2]});
+						}
 					}
 					else{
 						x_start_per_UND_cluster.push_back({std::nan("")});
@@ -2494,6 +2614,7 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 				}
 
 
+
 				std::cout<<"nb_fit_solution_per_elec_cluster[j] = "<<nb_fit_solution_per_elec_cluster[j]<<std::endl;
 				std::cout<<"x_is_on_source_foil.size() = "<<x_is_on_source_foil.size()<< std::endl;
 				for(int f = 0 ; f < nb_fit_solution_per_elec_cluster[j]; f++){
@@ -2589,6 +2710,8 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 		vector<TrackMatch> potential_matches;
 		elec_used.assign(nb_of_elec_candidates, false);
 		und_used.assign(nb_of_UND_candidates, false);
+		std::vector<TrackMatch> best_matches;
+
 		if(tracks_with_associated_calo && tracks_without_associated_calo){
 
 			for(int j = 0; j < nb_of_elec_candidates; j++) {
@@ -2604,13 +2727,13 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 							// Vérifier que les traces sont de côtés opposés
 							if((side_elec == 1 && side_UND == 0) || (side_elec == 0 && side_UND == 1)) {
 								// Vérifier la proximité temporelle
-								double time_diff = abs((min_time_per_UND_cluster.at(m)) - (OM_timestamp_per_elec_cluster.at(j).at(0)))  ; // wtf les times... c'est pas en us
+								double time_diff = ((min_time_per_UND_cluster.at(m)) - (OM_timestamp_per_elec_cluster.at(j).at(0)))  ; // wtf les times... c'est pas en us ATTENTION AVANT EN ABS ICI AUSSI ! 
 								//std::cout<<"================ EVENT : "<<event_number<<"================ "<<ptd_event<<std::endl;
 								//std::cout<<"min_time_per_UND_cluster.at(m) = "<<std::setprecision(25)<<min_time_per_UND_cluster.at(m)<<std::endl;
 								//std::cout<<"OM_timestamp_per_elec_cluster.at(j).front() = "<<std::setprecision(25)<<OM_timestamp_per_elec_cluster.at(j).front()<<std::endl;
 								//std::cout<<"time_diff = "<<std::setprecision(25)<<time_diff<<std::endl;
 
-								if(time_diff <= 10000000E-6) { // To be justified
+								if(time_diff <= 10.0E-6 && time_diff>= -0.5E-6 ) { // before was 10.0E-6 To be justified ==> Done but here we need to remove cut < 0  ! DONE ! 
 
 									//std::cout<<" OUI !"<<std::endl;
 									for(int n = 0; n < nb_fit_solution_per_UND_cluster.at(m); n++) { // Lopp in UND fit solutions
@@ -2630,7 +2753,7 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 											);
 
 											// Si la distance est raisonnable (à ajuster selon vos besoins)
-											if(spatial_distance < 5000000) { // en mm 
+											if(spatial_distance <= 200) { // en mm before was 200.0
 												TrackMatch match;
 												match.elec_idx = j;
 												match.und_idx = m;
@@ -2648,75 +2771,75 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 												potential_matches.push_back(match);
 											}
 										}
-										// Sinon utiliser les derniers points
-										else{
-											//std::cout<<"==> 	last points used ! "<<std::endl;
-
-											double spatial_distance_start, spatial_distance_end, spatial_distance;
-
-											if (cell_num_per_elec_cluster.at(j).front() < 1017) {
-												// Compare start of elec with start and end of UND
-												spatial_distance_start = calculateDistance(
-													x_start_per_elec_cluster.at(j).at(l),
-													y_start_per_elec_cluster.at(j).at(l),
-													z_start_per_elec_cluster.at(j).at(l),
-													x_start_per_UND_cluster.at(m).at(n),
-													y_start_per_UND_cluster.at(m).at(n),
-													z_start_per_UND_cluster.at(m).at(n)
-												);
-
-												spatial_distance_end = calculateDistance(
-													x_start_per_elec_cluster.at(j).at(l),
-													y_start_per_elec_cluster.at(j).at(l),
-													z_start_per_elec_cluster.at(j).at(l),
-													x_end_per_UND_cluster.at(m).at(n),
-													y_end_per_UND_cluster.at(m).at(n),
-													z_end_per_UND_cluster.at(m).at(n)
-												);
-											} 
-											else if(1==0) {
-												// Compare end of elec with start and end of UND
-												spatial_distance_start = calculateDistance(
-													x_end_per_elec_cluster.at(j).at(l),
-													y_end_per_elec_cluster.at(j).at(l),
-													z_end_per_elec_cluster.at(j).at(l),
-													x_start_per_UND_cluster.at(m).at(n),
-													y_start_per_UND_cluster.at(m).at(n),
-													z_start_per_UND_cluster.at(m).at(n)
-												);
-
-												spatial_distance_end = calculateDistance(
-													x_end_per_elec_cluster.at(j).at(l),
-													y_end_per_elec_cluster.at(j).at(l),
-													z_end_per_elec_cluster.at(j).at(l),
-													x_end_per_UND_cluster.at(m).at(n),
-													y_end_per_UND_cluster.at(m).at(n),
-													z_end_per_UND_cluster.at(m).at(n)
-												);
-											}
-
-											// Determine the closest point (start or end)
-											spatial_distance = std::min(spatial_distance_start, spatial_distance_end);
-
-											if (spatial_distance <= 50000) { // Adjust threshold as needed
-												TrackMatch match;
-												match.elec_idx = j;
-												match.und_idx = m;
-												match.elec_fit_idx = l;
-												match.und_fit_idx = n;
-												match.spatial_distance = spatial_distance;
-												match.time_difference = time_diff;
-
-												//Store additional information about the closest point
-												if (spatial_distance == spatial_distance_start) {
-													match.closest_point = "start";
-												} else {
-													match.closest_point = "end";
-												}
-
-												potential_matches.push_back(match);
-											}
-										}
+										//// Sinon utiliser les derniers points
+										//else{
+										//	//std::cout<<"==> 	last points used ! "<<std::endl;
+//
+										//	double spatial_distance_start, spatial_distance_end, spatial_distance;
+//
+										//	if (cell_num_per_elec_cluster.at(j).front() < 1017) {
+										//		// Compare start of elec with start and end of UND
+										//		spatial_distance_start = calculateDistance(
+										//			x_start_per_elec_cluster.at(j).at(l),
+										//			y_start_per_elec_cluster.at(j).at(l),
+										//			z_start_per_elec_cluster.at(j).at(l),
+										//			x_start_per_UND_cluster.at(m).at(n),
+										//			y_start_per_UND_cluster.at(m).at(n),
+										//			z_start_per_UND_cluster.at(m).at(n)
+										//		);
+//
+										//		spatial_distance_end = calculateDistance(
+										//			x_start_per_elec_cluster.at(j).at(l),
+										//			y_start_per_elec_cluster.at(j).at(l),
+										//			z_start_per_elec_cluster.at(j).at(l),
+										//			x_end_per_UND_cluster.at(m).at(n),
+										//			y_end_per_UND_cluster.at(m).at(n),
+										//			z_end_per_UND_cluster.at(m).at(n)
+										//		);
+										//	} 
+										//	else if(cell_num_per_elec_cluster.at(j).front() >= 1017) { // ??? avant else if (1==0)... ??? 
+										//		// Compare end of elec with start and end of UND
+										//		spatial_distance_start = calculateDistance(
+										//			x_end_per_elec_cluster.at(j).at(l),
+										//			y_end_per_elec_cluster.at(j).at(l),
+										//			z_end_per_elec_cluster.at(j).at(l),
+										//			x_start_per_UND_cluster.at(m).at(n),
+										//			y_start_per_UND_cluster.at(m).at(n),
+										//			z_start_per_UND_cluster.at(m).at(n)
+										//		);
+//
+										//		spatial_distance_end = calculateDistance(
+										//			x_end_per_elec_cluster.at(j).at(l),
+										//			y_end_per_elec_cluster.at(j).at(l),
+										//			z_end_per_elec_cluster.at(j).at(l),
+										//			x_end_per_UND_cluster.at(m).at(n),
+										//			y_end_per_UND_cluster.at(m).at(n),
+										//			z_end_per_UND_cluster.at(m).at(n)
+										//		);
+										//	}
+//
+										//	// Determine the closest point (start or end)
+										//	spatial_distance = std::min(spatial_distance_start, spatial_distance_end);
+//
+										//	if (spatial_distance <= 50000) { // Adjust threshold as needed
+										//		TrackMatch match;
+										//		match.elec_idx = j;
+										//		match.und_idx = m;
+										//		match.elec_fit_idx = l;
+										//		match.und_fit_idx = n;
+										//		match.spatial_distance = spatial_distance;
+										//		match.time_difference = time_diff;
+//
+										//		//Store additional information about the closest point
+										//		if (spatial_distance == spatial_distance_start) {
+										//			match.closest_point = "start";
+										//		} else {
+										//			match.closest_point = "end";
+										//		}
+//
+										//		potential_matches.push_back(match);
+										//	}
+										//}
 									}
 								}
 							}
@@ -2724,6 +2847,7 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 					}
 				}
 			}
+
 			// Après avoir rempli potential_matches
 
 			// Trie les matches par distance spatiale croissante
@@ -2740,7 +2864,7 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 			und_used.assign(nb_of_UND_candidates, false); // WARNING .assign can be time consuming (more than .resize() )
 
 
-			std::vector<TrackMatch> best_matches;
+			//std::vector<TrackMatch> best_matches;
 
 			for(const auto& match : potential_matches) {
 				if(!elec_used[match.elec_idx] && !und_used[match.und_idx]) {
@@ -2749,22 +2873,22 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 					und_used[match.und_idx] = true;
 				}
 			}
-			std::cout<<"SIZE elec_used = "<<elec_used.size()<<std::endl;
-			for(int i = 0; i <elec_used.size(); i++){
-				std:cout<<"elec_used["<<i<<"] = "<<elec_used[i]<<std::endl;
-
-			}
+			//std::cout<<"SIZE elec_used = "<<elec_used.size()<<std::endl;
+			//for(int i = 0; i <elec_used.size(); i++){
+			//	std:cout<<"elec_used["<<i<<"] = "<<elec_used[i]<<std::endl;
+//
+			//}
 			// Affiche les associations retenues
 			//std::cout << "Best unique matches (one per electron cluster):" << std::endl;
 
 			
 			//std::cout<<"		 !! --> NB of best matches = "<<best_matches.size()<<std::endl;
 			if(best_matches.size() >= 1) {
-				std::cout<<"		 ==================================================================== LAAAAAAAAAAAAAAA =============================================== "<<std::endl;
+				//std::cout<<"		 ==================================================================== LAAAAAAAAAAAAAAA =============================================== "<<std::endl;
 				tracks_elec_crossing = true;
 			}
 			nb_of_elec_crossing = best_matches.size();
-
+			
 			for(size_t idx = 0; idx < best_matches.size(); ++idx){
 				const TrackMatch& match = best_matches[idx];
 				//std::cout << "Best Match " << idx
@@ -2827,9 +2951,9 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 				} 
 				if(match.closest_point == "end") {
 					//std::cout<<"		==> 	end point used ! "<<std::endl;
-					x_start_per_elec_crossing.push_back({x_start_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx)});
-					y_start_per_elec_crossing.push_back({y_start_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx)});
-					z_start_per_elec_crossing.push_back({z_start_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx)});
+					x_start_per_elec_crossing.push_back({x_end_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx)});
+					y_start_per_elec_crossing.push_back({y_end_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx)});
+					z_start_per_elec_crossing.push_back({z_end_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx)});
 					//std::cout<<"x_start_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx) = "<<x_start_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx)<<std::endl;
 					//std::cout<<"y_start_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx) = "<<y_start_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx)<<std::endl;
 					//std::cout<<"z_start_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx) = "<<z_start_per_UND_cluster.at(match.und_idx).at(match.und_fit_idx)<<std::endl;
@@ -2844,9 +2968,9 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 				}
 				if(cell_num_per_elec_cluster.at(match.elec_idx).front() >= 1017 && cell_num_per_UND_cluster.at(match.und_idx).front() < 1017){
 					//std::cout<<"		==> 	elec side 1 ! ==> START Used for elec end "<<std::endl;
-					x_end_per_elec_crossing.push_back({x_start_per_elec_cluster.at(match.elec_idx).at(match.elec_fit_idx)});
-					y_end_per_elec_crossing.push_back({y_start_per_elec_cluster.at(match.elec_idx).at(match.elec_fit_idx)});
-					z_end_per_elec_crossing.push_back({z_start_per_elec_cluster.at(match.elec_idx).at(match.elec_fit_idx)});
+					x_end_per_elec_crossing.push_back({x_end_per_elec_cluster.at(match.elec_idx).at(match.elec_fit_idx)});
+					y_end_per_elec_crossing.push_back({y_end_per_elec_cluster.at(match.elec_idx).at(match.elec_fit_idx)});
+					z_end_per_elec_crossing.push_back({z_end_per_elec_cluster.at(match.elec_idx).at(match.elec_fit_idx)});
 				}		
 				
 				OM_num_per_elec_crossing.push_back({OM_num_per_elec_cluster.at(match.elec_idx).at(0)});
@@ -2856,9 +2980,10 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 				OM_amplitude_per_elec_crossing.push_back({OM_amplitude_per_elec_cluster.at(match.elec_idx).at(0)});
 				OM_LT_only_per_elec_crossing.push_back({OM_LT_only_per_elec_cluster.at(match.elec_idx).at(0)});
 				OM_HT_per_elec_crossing.push_back({OM_HT_per_elec_cluster.at(match.elec_idx).at(0)});
+				nb_of_OM_per_elec_crossing.push_back({OM_num_per_elec_cluster.at(match.elec_idx).size()});
 
-				ID_cluster_per_elec_crossing.push_back(ID_clsuter_per_elec_cluster.at(match.elec_idx));					// NEED TO STORE THIS IN THE TREE ! WRITE DONE WHEN IT'LL BE DONE
-				ID_cluster_UND_per_elec_crossing.push_back(ID_clsuter_UND.at(match.und_idx));					// NEED TO STORE THIS IN THE TREE ! WRITE DONE WHEN IT'LL BE DONE
+				ID_cluster_per_elec_crossing.push_back(ID_clsuter_per_elec_cluster.at(match.elec_idx));			// NEED TO STORE THIS IN THE TREE ! WRITE DONE WHEN IT'LL BE DONE : DONE :) Oh thanks ! u r welcome
+				ID_cluster_UND_per_elec_crossing.push_back(ID_clsuter_UND.at(match.und_idx));					// NEED TO STORE THIS IN THE TREE ! WRITE DONE WHEN IT'LL BE DONE : DONE :) Oh thanks ! u r welcome
 				
 				double elec_track_length = calculateDistance(
 					x_start_per_elec_cluster.at(match.elec_idx).at(match.elec_fit_idx),
@@ -2887,20 +3012,23 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 				lenght_per_elec_crossing.push_back({total_track_length});
 				
 				vector<double> temp_delta_t_cells_of_UND_per_elec_crossing;
-				for(int k = 0; k < nb_cell_per_UND_cluster.at(match.und_idx); k++){
-					//std::cout<<"delta_t = "<<abs((anode_time_per_UND_cluster.at(match.und_idx).at(k) )*1E-9- (OM_timestamp_per_elec_cluster.at(match.elec_idx).at(0) *1E-9 ) )<<std::endl;
-					//std::cout<<"OM_timestamp_per_elec_cluster.at(match.elec_idx).size() = "<<OM_timestamp_per_elec_cluster.at(match.elec_idx).size()<<std::endl;
-					temp_delta_t_cells_of_UND_per_elec_crossing.push_back(abs((anode_time_per_UND_cluster.at(match.und_idx).at(k)  )- (OM_timestamp_per_elec_cluster.at(match.elec_idx).at(0)  ) )); //us
-
-				}
-				delta_t_cells_of_UND_per_elec_crossing.push_back(temp_delta_t_cells_of_UND_per_elec_crossing);
+				//for(int k = 0; k < nb_cell_per_UND_cluster.at(match.und_idx); k++){
+				//	//std::cout<<"delta_t = "<<abs((anode_time_per_UND_cluster.at(match.und_idx).at(k) )*1E-9- (OM_timestamp_per_elec_cluster.at(match.elec_idx).at(0) *1E-9 ) )<<std::endl;
+				//	//std::cout<<"OM_timestamp_per_elec_cluster.at(match.elec_idx).size() = "<<OM_timestamp_per_elec_cluster.at(match.elec_idx).size()<<std::endl;
+				//	temp_delta_t_cells_of_UND_per_elec_crossing.push_back( /*(anode_time_per_UND_cluster.at(match.und_idx).at(k)  )- (OM_timestamp_per_elec_cluster.at(match.elec_idx).at(0)  )*/match.time_difference ); //us ICI AVANT EN ABS ATTENTION AVANT CT CA !  
+//
+				//}
+				delta_t_cells_of_UND_per_elec_crossing.push_back({match.time_difference}); // Delta t between elec crossing and UND cells merged with electron 
 				vector<double> temp_delta_t_cells_of_elec_per_elec_crossing;
 				for(int k = 0; k < nb_cell_per_elec_cluster.at(match.elec_idx); k++){
-					temp_delta_t_cells_of_elec_per_elec_crossing.push_back(abs((anode_time_per_elec_cluster.at(match.elec_idx).at(k)  )- (OM_timestamp_per_elec_cluster.at(match.elec_idx).at(0)  )));
+					temp_delta_t_cells_of_elec_per_elec_crossing.push_back((anode_time_per_elec_cluster.at(match.elec_idx).at(k)  )- (OM_timestamp_per_elec_cluster.at(match.elec_idx).at(0)  )); //us ICI AVANT EN ABSs
 				}
 
 				delta_t_cells_of_elec_per_elec_crossing.push_back(temp_delta_t_cells_of_elec_per_elec_crossing);
+
+				
 			}
+			
 		}
 		
 		for(int k = 0; k < cell_num_per_elec_crossing.size(); k++){
@@ -2998,8 +3126,288 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 			}
 		}
 		// Gona try to replace electron cluster with elec crossing information.
-/* 
+ 
 		if(nb_of_elec_crossing>0){
+			for(int i = 0; i < best_matches.size(); i++){
+				const TrackMatch& match = best_matches[i];
+
+				if(elec_used[match.elec_idx] == true){
+					//std::cout<<"elec_used["<<i<<"] = "<<elec_used[i]<<std::endl;
+					cell_num_per_elec_cluster[match.elec_idx] = cell_num_per_elec_crossing[i];
+					anode_time_per_elec_cluster[match.elec_idx] = anode_time_per_elec_crossing[i];
+					top_cathode_per_elec_cluster[match.elec_idx] = top_cathode_per_elec_crossing[i];
+					bottom_cathode_per_elec_cluster[match.elec_idx] = bottom_cathode_per_elec_crossing[i];
+					z_of_cells_per_elec_cluster[match.elec_idx] = z_of_cells_per_elec_crossing[i];
+					sigma_z_of_cells_per_elec_cluster[match.elec_idx] = sigma_z_of_cells_per_elec_crossing[i];
+					r_of_cells_per_elec_cluster[match.elec_idx] = r_of_cells_per_elec_crossing[i];
+					sigma_r_of_cells_per_elec_cluster[match.elec_idx] = sigma_r_of_cells_per_elec_crossing[i];
+					x_start_per_elec_cluster[match.elec_idx] = x_start_per_elec_crossing[i];
+					y_start_per_elec_cluster[match.elec_idx] = y_start_per_elec_crossing[i];
+					z_start_per_elec_cluster[match.elec_idx] = z_start_per_elec_crossing[i];
+					x_end_per_elec_cluster[match.elec_idx] = x_end_per_elec_crossing[i];
+					y_end_per_elec_cluster[match.elec_idx] = y_end_per_elec_crossing[i];
+					z_end_per_elec_cluster[match.elec_idx] = z_end_per_elec_crossing[i];
+					OM_num_per_elec_cluster[match.elec_idx] = OM_num_per_elec_crossing[i];
+					E_OM_per_elec_cluster[match.elec_idx] = E_OM_per_elec_crossing[i];
+					OM_timestamp_per_elec_cluster[match.elec_idx] = OM_timestamp_per_elec_crossing[i];
+					OM_charge_per_elec_cluster[match.elec_idx] = OM_charge_per_elec_crossing[i];
+					OM_amplitude_per_elec_cluster[match.elec_idx] = OM_amplitude_per_elec_crossing[i];
+					OM_LT_only_per_elec_cluster[match.elec_idx] = OM_LT_only_per_elec_crossing[i];
+					OM_HT_per_elec_cluster[match.elec_idx] = OM_HT_per_elec_crossing[i];
+					nb_cell_per_elec_cluster[match.elec_idx] = nb_of_cell_per_elec_crossing[i];
+
+					nb_of_OM_per_elec_cluster[match.elec_idx] = nb_of_OM_per_elec_crossing[i].size();
+					nb_fit_solution_per_elec_cluster[match.elec_idx] = 1; // We have only one fit solution per elec crossing
+					
+					x_is_on_reference_source_plane[match.elec_idx] = {x_is_on_reference_source_plane[match.elec_idx][match.elec_fit_idx]};
+					y_is_on_reference_source_plane[match.elec_idx] = {y_is_on_reference_source_plane[match.elec_idx][match.elec_fit_idx]};
+					z_is_on_reference_source_plane[match.elec_idx] = {z_is_on_reference_source_plane[match.elec_idx][match.elec_fit_idx]};
+
+					x_is_on_source_foil[match.elec_idx] = {x_is_on_source_foil[match.elec_idx][match.elec_fit_idx]};
+					y_is_on_source_foil[match.elec_idx] = {y_is_on_source_foil[match.elec_idx][match.elec_fit_idx]};
+					z_is_on_source_foil[match.elec_idx] = {z_is_on_source_foil[match.elec_idx][match.elec_fit_idx]};
+					x_is_on_main_calorimeter[match.elec_idx] = {x_is_on_main_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					y_is_on_main_calorimeter[match.elec_idx] = {y_is_on_main_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					z_is_on_main_calorimeter[match.elec_idx] = {z_is_on_main_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					x_is_on_x_calorimeter[match.elec_idx] = {x_is_on_x_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					y_is_on_x_calorimeter[match.elec_idx] = {y_is_on_x_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					z_is_on_x_calorimeter[match.elec_idx] = {z_is_on_x_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					x_is_on_gamma_veto[match.elec_idx] = {x_is_on_gamma_veto[match.elec_idx][match.elec_fit_idx]};
+					y_is_on_gamma_veto[match.elec_idx] = {y_is_on_gamma_veto[match.elec_idx][match.elec_fit_idx]};
+					z_is_on_gamma_veto[match.elec_idx] = {z_is_on_gamma_veto[match.elec_idx][match.elec_fit_idx]};
+					x_is_on_wire[match.elec_idx] = {x_is_on_wire[match.elec_idx][match.elec_fit_idx]};
+					y_is_on_wire[match.elec_idx] = {y_is_on_wire[match.elec_idx][match.elec_fit_idx]};
+					z_is_on_wire[match.elec_idx] = {z_is_on_wire[match.elec_idx][match.elec_fit_idx]};
+					x_is_in_gas[match.elec_idx] = {x_is_in_gas[match.elec_idx][match.elec_fit_idx]};
+					y_is_in_gas[match.elec_idx] = {y_is_in_gas[match.elec_idx][match.elec_fit_idx]};
+					z_is_in_gas[match.elec_idx] = {z_is_in_gas[match.elec_idx][match.elec_fit_idx]};
+					x_is_on_source_gap[match.elec_idx] = {x_is_on_source_gap[match.elec_idx][match.elec_fit_idx]};
+					y_is_on_source_gap[match.elec_idx] = {y_is_on_source_gap[match.elec_idx][match.elec_fit_idx]};
+					z_is_on_source_gap[match.elec_idx] = {z_is_on_source_gap[match.elec_idx][match.elec_fit_idx]};
+
+
+					xy_distance_from_reference_source_plane[match.elec_idx] = {xy_distance_from_reference_source_plane[match.elec_idx][match.elec_fit_idx]};
+					xy_distance_from_source_foil[match.elec_idx] = {xy_distance_from_source_foil[match.elec_idx][match.elec_fit_idx]};
+					xy_distance_from_main_calorimeter[match.elec_idx] = {xy_distance_from_main_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					xy_distance_from_x_calorimeter[match.elec_idx] = {xy_distance_from_x_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					xy_distance_from_gamma_veto[match.elec_idx] = {xy_distance_from_gamma_veto[match.elec_idx][match.elec_fit_idx]};
+					xy_distance_from_wire[match.elec_idx] = {xy_distance_from_wire[match.elec_idx][match.elec_fit_idx]};
+					xy_distance_from_gas[match.elec_idx] = {xy_distance_from_gas[match.elec_idx][match.elec_fit_idx]};
+					xy_distance_from_source_gap[match.elec_idx] = {xy_distance_from_source_gap[match.elec_idx][match.elec_fit_idx]};
+
+					xyz_distance_from_reference_source_plane[match.elec_idx] =  {xyz_distance_from_reference_source_plane[match.elec_idx][match.elec_fit_idx]};
+					xyz_distance_from_source_foil[match.elec_idx] =  {xyz_distance_from_source_foil[match.elec_idx][match.elec_fit_idx]};
+					xyz_distance_from_main_calorimeter[match.elec_idx] =  {xyz_distance_from_main_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					xyz_distance_from_x_calorimeter[match.elec_idx] =  {xyz_distance_from_x_calorimeter[match.elec_idx][match.elec_fit_idx]};
+					xyz_distance_from_gamma_veto[match.elec_idx] =  {xyz_distance_from_gamma_veto[match.elec_idx][match.elec_fit_idx]};
+					xyz_distance_from_wire[match.elec_idx] =  {xyz_distance_from_wire[match.elec_idx][match.elec_fit_idx]};
+					xyz_distance_from_gas[match.elec_idx] =  {xyz_distance_from_gas[match.elec_idx][match.elec_fit_idx]};
+					xyz_distance_from_source_gap[match.elec_idx] =  {xyz_distance_from_source_gap[match.elec_idx][match.elec_fit_idx]};
+
+
+					
+				}
+			}
+			// add on 11/09/2025: remove UND candidate associated with elec crossing from UND candidates vectors
+			// Collect indices of UND candidates to erase
+    		std::vector<int> und_indices_to_erase;
+    		for (const auto& match : best_matches) {
+        		und_indices_to_erase.push_back(match.und_idx);
+    		}
+    		// Sort and remove duplicates
+    		std::sort(und_indices_to_erase.begin(), und_indices_to_erase.end());
+    		und_indices_to_erase.erase(std::unique(und_indices_to_erase.begin(), und_indices_to_erase.end()), und_indices_to_erase.end());
+
+    		// Erase from all UND-related vectors in reverse order to keep indices valid
+    		for (auto it = und_indices_to_erase.rbegin(); it != und_indices_to_erase.rend(); ++it) {
+        		int idx = *it;
+        		cell_num_per_UND_cluster.erase(cell_num_per_UND_cluster.begin() + idx);
+        		anode_time_per_UND_cluster.erase(anode_time_per_UND_cluster.begin() + idx);
+        		top_cathodes_per_UND_cluster.erase(top_cathodes_per_UND_cluster.begin() + idx);
+        		bottom_cathodes_per_UND_cluster.erase(bottom_cathodes_per_UND_cluster.begin() + idx);
+        		z_of_cell_per_UND_cluster.erase(z_of_cell_per_UND_cluster.begin() + idx);
+        		sigma_z_of_cells_per_UND_cluster.erase(sigma_z_of_cells_per_UND_cluster.begin() + idx);
+        		r_of_cells_per_UND_cluster.erase(r_of_cells_per_UND_cluster.begin() + idx);
+        		sigma_r_of_cells_per_UND_cluster.erase(sigma_r_of_cells_per_UND_cluster.begin() + idx);
+        		UND_cluster_is_delayed.erase(UND_cluster_is_delayed.begin() + idx);
+        		UND_cluster_is_prompt.erase(UND_cluster_is_prompt.begin() + idx);
+        		ID_clsuter_UND.erase(ID_clsuter_UND.begin() + idx);
+        		x_start_per_UND_cluster.erase(x_start_per_UND_cluster.begin() + idx);
+        		y_start_per_UND_cluster.erase(y_start_per_UND_cluster.begin() + idx);
+        		z_start_per_UND_cluster.erase(z_start_per_UND_cluster.begin() + idx);
+        		x_end_per_UND_cluster.erase(x_end_per_UND_cluster.begin() + idx);
+        		y_end_per_UND_cluster.erase(y_end_per_UND_cluster.begin() + idx);
+        		z_end_per_UND_cluster.erase(z_end_per_UND_cluster.begin() + idx);
+        		nb_cell_per_UND_cluster.erase(nb_cell_per_UND_cluster.begin() + idx);
+        		min_time_per_UND_cluster.erase(min_time_per_UND_cluster.begin() + idx);
+        		nb_fit_solution_per_UND_cluster.erase(nb_fit_solution_per_UND_cluster.begin() + idx);
+				
+        		x_is_on_reference_source_plane_per_UND_cluster.erase(x_is_on_reference_source_plane_per_UND_cluster.begin() + idx);
+        		y_is_on_reference_source_plane_per_UND_cluster.erase(y_is_on_reference_source_plane_per_UND_cluster.begin() + idx);
+        		z_is_on_reference_source_plane_per_UND_cluster.erase(z_is_on_reference_source_plane_per_UND_cluster.begin() + idx);
+        		x_is_on_source_foil_per_UND_cluster.erase(x_is_on_source_foil_per_UND_cluster.begin() + idx);
+        		y_is_on_source_foil_per_UND_cluster.erase(y_is_on_source_foil_per_UND_cluster.begin() + idx);
+        		z_is_on_source_foil_per_UND_cluster.erase(z_is_on_source_foil_per_UND_cluster.begin() + idx);
+        		x_is_on_wire_per_UND_cluster.erase(x_is_on_wire_per_UND_cluster.begin() + idx);
+        		y_is_on_wire_per_UND_cluster.erase(y_is_on_wire_per_UND_cluster.begin() + idx);
+        		z_is_on_wire_per_UND_cluster.erase(z_is_on_wire_per_UND_cluster.begin() + idx);
+        		x_is_in_gas_per_UND_cluster.erase(x_is_in_gas_per_UND_cluster.begin() + idx);
+        		y_is_in_gas_per_UND_cluster.erase(y_is_in_gas_per_UND_cluster.begin() + idx);
+        		z_is_in_gas_per_UND_cluster.erase(z_is_in_gas_per_UND_cluster.begin() + idx);
+        		x_is_on_source_gap_per_UND_cluster.erase(x_is_on_source_gap_per_UND_cluster.begin() + idx);
+        		y_is_on_source_gap_per_UND_cluster.erase(y_is_on_source_gap_per_UND_cluster.begin() + idx);
+        		z_is_on_source_gap_per_UND_cluster.erase(z_is_on_source_gap_per_UND_cluster.begin() + idx);
+        		xy_distance_from_reference_source_plane_per_UND_cluster.erase(xy_distance_from_reference_source_plane_per_UND_cluster.begin() + idx);
+        		xy_distance_from_source_foil_per_UND_cluster.erase(xy_distance_from_source_foil_per_UND_cluster.begin() + idx);
+        		xy_distance_from_wire_per_UND_cluster.erase(xy_distance_from_wire_per_UND_cluster.begin() + idx);
+        		xy_distance_from_gas_per_UND_cluster.erase(xy_distance_from_gas_per_UND_cluster.begin() + idx);
+        		xy_distance_from_source_gap_per_UND_cluster.erase(xy_distance_from_source_gap_per_UND_cluster.begin() + idx);
+        		xyz_distance_from_reference_source_plane_per_UND_cluster.erase(xyz_distance_from_reference_source_plane_per_UND_cluster.begin() + idx);
+        		xyz_distance_from_source_foil_per_UND_cluster.erase(xyz_distance_from_source_foil_per_UND_cluster.begin() + idx);
+        		xyz_distance_from_wire_per_UND_cluster.erase(xyz_distance_from_wire_per_UND_cluster.begin() + idx);
+        		xyz_distance_from_gas_per_UND_cluster.erase(xyz_distance_from_gas_per_UND_cluster.begin() + idx);
+        		xyz_distance_from_source_gap_per_UND_cluster.erase(xyz_distance_from_source_gap_per_UND_cluster.begin() + idx);
+
+        		vertex_is_on_reference_source_plane_per_UND_cluster.erase(vertex_is_on_reference_source_plane_per_UND_cluster.begin() + idx);
+        		vertex_is_on_source_foil_per_UND_cluster.erase(vertex_is_on_source_foil_per_UND_cluster.begin() + idx);
+        		vertex_is_on_wire_per_UND_cluster.erase(vertex_is_on_wire_per_UND_cluster.begin() + idx);
+        		vertex_is_in_gas_per_UND_cluster.erase(vertex_is_in_gas_per_UND_cluster.begin() + idx);
+        		vertex_is_on_source_gap_per_UND_cluster.erase(vertex_is_on_source_gap_per_UND_cluster.begin() + idx);
+			
+			}
+    		// Update nb_of_UND_candidates
+    		nb_of_UND_candidates = cell_num_per_UND_cluster.size();
+			auto per_crossing_distance = distance_elec_UND_per_elec_crossing;
+    		auto per_crossing_dt_UND   = delta_t_cells_of_UND_per_elec_crossing;
+    		auto per_crossing_dt_elec  = delta_t_cells_of_elec_per_elec_crossing;
+
+    		// final number of electron clusters after merging/erasure
+    		size_t nele = static_cast<size_t>(std::max(0, nb_of_elec_candidates));
+
+    		// reset target vectors so they become indexed by elec-cluster index (0..nele-1)
+    		distance_elec_UND_per_elec_crossing.clear();
+    		delta_t_cells_of_UND_per_elec_crossing.clear();
+    		delta_t_cells_of_elec_per_elec_crossing.clear();
+
+    		distance_elec_UND_per_elec_crossing.resize(nele);
+    		delta_t_cells_of_UND_per_elec_crossing.resize(nele);
+    		delta_t_cells_of_elec_per_elec_crossing.resize(nele);
+
+    		// fill per-electron slots: per_crossing[i] corresponds to best_matches[i]
+    		for (size_t i = 0; i < per_crossing_distance.size(); ++i) {
+    		    if (i >= best_matches.size()) break; // defensive
+    		    int elec_index = best_matches[i].elec_idx;
+    		    if (elec_index >= 0 && static_cast<size_t>(elec_index) < nele) {
+    		        distance_elec_UND_per_elec_crossing[elec_index] = per_crossing_distance[i];
+    		        delta_t_cells_of_UND_per_elec_crossing[elec_index] = per_crossing_dt_UND[i];
+    		        delta_t_cells_of_elec_per_elec_crossing[elec_index] = per_crossing_dt_elec[i];
+    		    }
+    		}
+
+		}
+
+		// add the 29/09/2025 : Here we gonna remove elec candidates when there are at least one unfited cluster temporally associated with it (abs(delta t)< 10 µs)
+		elec_is_associated_with_track.assign(nb_of_elec_candidates, 0);
+		
+		for(int m = nb_of_elec_candidates-1; m >=0; m--){
+			//std::cout<<"==> m = "<<m<<std::endl;
+			//std::cout<<"ID_clsuter_per_elec_cluster[m] = "<<ID_clsuter_per_elec_cluster[m]<<std::endl;
+			//std::cout<<"OM_timestamp_per_elec_cluster.at(m).front() = "<<std::setprecision(10)<<OM_timestamp_per_elec_cluster.at(m).front()<<std::endl;
+
+			for(int n = 0; n < cluster_id.size(); n++){
+
+				if( ((std::find(ID_clsuter_per_elec_cluster.begin(), ID_clsuter_per_elec_cluster.end(), cluster_id[n]) == ID_clsuter_per_elec_cluster.end() ) == true) 
+					&& (std::find(ID_cluster_UND_per_elec_crossing.begin(), ID_cluster_UND_per_elec_crossing.end(), cluster_id[n] ) == ID_cluster_UND_per_elec_crossing.end())
+				 	&& (std::find(ID_clsuter_UND.begin(), ID_clsuter_UND.end(), cluster_id[n])== ID_clsuter_UND.end() ) ){
+					
+					//std::cout<<"YES ! ID cluster Elec != cluster_ID "<<std::endl;
+					//std::cout<<"m =" << m << " n = "<<n<< " delta t = "<< std::setprecision(10) << abs(OM_timestamp_per_elec_cluster.at(m).front() - cluster_mean_anodic_time.at(n)) << std::endl;
+					
+					if( abs(OM_timestamp_per_elec_cluster.at(m).front() - cluster_mean_anodic_time.at(n) ) <= 10E-6){
+						//std::cout<<"========================================================================================================"<<"\n"
+						//<<"========================================================================================================"<<"\n\n\n"
+						//<<"========================================================================================================"<<std::endl;
+						//std::cout<<" Elec candidate with ID = "<<ID_clsuter_per_elec_cluster[m]<<" is temporally associated with unfited cluster with ID = "<< cluster_id[n] <<" and mean anodic time = "<<cluster_mean_anodic_time.at(n)<<" s ! So we remove it from elec candidates list !"<<std::endl;
+						
+						elec_is_associated_with_track[m] = 1;
+
+						break;
+					}
+				}
+			}
+		}
+
+		if(DEBUG == true && nb_of_elec_crossing>0){
+
+			std::cout <<" LA "<<std::endl;
+			for(int i = 0; i < nb_of_elec_candidates; i++){
+				std::cout<<" i = "<<i<<std::endl;
+				std::cout <<"======================== ELEC CLUSTER DEBUG ===================== \n"<<std::endl;
+				std::cout<<"Elec cluster with ID = "<<ID_clsuter_per_elec_cluster[i]<<" : "<<std::endl;
+				std::cout<<"elec_is_associated_with_track = "<<elec_is_associated_with_track[i]<<std::endl;
+				std::cout<<"nb_cell_per_elec_cluster = "<<nb_cell_per_elec_cluster[i]<<std::endl;
+				std::cout<<" elec used = "<<elec_used[i]<<std::endl;
+				std::cout<<" 	==> OM_num_per_elec_cluster"<< OM_num_per_elec_cluster.at(i).front() <<std::endl;
+				std::cout<<"nb_of_OM_per_elec_cluster[i] = "<< nb_of_OM_per_elec_cluster[i]<<std::endl;
+				std::cout<<" 	==> E_OM_per_elec_cluster = "<< E_OM_per_elec_cluster.at(i).front() <<std::endl;
+				
+				for(int j = 0; j < cell_num_per_elec_cluster[i].size(); j++){
+					std::cout<<"	==> NUM CELL = "<<cell_num_per_elec_cluster[i][j]<<std::endl;
+
+				}
+				for(int j = 0; j< x_start_per_elec_cluster[i].size(); j++){
+					
+					std::cout<<" ==> x_is_on_reference_source_plane = "<< x_is_on_reference_source_plane[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> y_is_on_reference_source_plane = "<< y_is_on_reference_source_plane[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> z_is_on_reference_source_plane = "<< z_is_on_reference_source_plane[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> x_is_on_source_foil = "<< x_is_on_source_foil[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> y_is_on_source_foil = "<< y_is_on_source_foil[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> z_is_on_source_foil = "<< z_is_on_source_foil[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> x_is_on_main_calorimeter = "<< x_is_on_main_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> y_is_on_main_calorimeter = "<< y_is_on_main_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> z_is_on_main_calorimeter = "<< z_is_on_main_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> x_is_on_x_calorimeter = "<< x_is_on_x_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> y_is_on_x_calorimeter = "<< y_is_on_x_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> z_is_on_x_calorimeter = "<< z_is_on_x_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> x_is_on_gamma_veto = "<< x_is_on_gamma_veto[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> y_is_on_gamma_veto = "<< y_is_on_gamma_veto[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> z_is_on_gamma_veto = "<< z_is_on_gamma_veto[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> x_is_on_wire = "<< x_is_on_wire[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> y_is_on_wire = "<< y_is_on_wire[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> z_is_on_wire = "<< z_is_on_wire[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> x_is_in_gas = "<< x_is_in_gas[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> y_is_in_gas = "<< y_is_in_gas[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> z_is_in_gas = "<< z_is_in_gas[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> x_is_on_source_gap = "<< x_is_on_source_gap[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> y_is_on_source_gap = "<< y_is_on_source_gap[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> z_is_on_source_gap = "<< z_is_on_source_gap[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xy_distance_from_reference_source_plane = "<< xy_distance_from_reference_source_plane[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xy_distance_from_source_foil = "<< xy_distance_from_source_foil[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xy_distance_from_main_calorimeter = "<< xy_distance_from_main_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xy_distance_from_x_calorimeter = "<< xy_distance_from_x_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xy_distance_from_gamma_veto = "<< xy_distance_from_gamma_veto[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xy_distance_from_wire = "<< xy_distance_from_wire[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xy_distance_from_gas = "<< xy_distance_from_gas[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xy_distance_from_source_gap = "<< xy_distance_from_source_gap[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xyz_distance_from_reference_source_plane = "<< xyz_distance_from_reference_source_plane[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xyz_distance_from_source_foil = "<< xyz_distance_from_source_foil[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xyz_distance_from_main_calorimeter = "<< xyz_distance_from_main_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xyz_distance_from_x_calorimeter = "<< xyz_distance_from_x_calorimeter[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xyz_distance_from_gamma_veto = "<< xyz_distance_from_gamma_veto[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xyz_distance_from_wire = "<< xyz_distance_from_wire[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xyz_distance_from_gas = "<< xyz_distance_from_gas[i][j]<<"\n"<<std::endl;
+					std::cout<<" ==> xyz_distance_from_source_gap = "<< xyz_distance_from_source_gap[i][j]<<"\n"<<std::endl;
+
+				}
+
+			}
+		}
+
+
+
+
+
+		/* if(nb_of_elec_crossing>0){
 			for(int i = 0; i < nb_of_elec_candidates; i++){
 				if(elec_used[i] == true){
 					//std::cout<<"elec_used["<<i<<"] = "<<elec_used[i]<<std::endl;
@@ -3047,24 +3455,20 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 						
 				
 					x_is_on_source_foil[i].push_back(x_is_on_source_foil[j][0]);
-						
 					y_is_on_source_foil[i].push_back(y_is_on_source_foil[j][0]);
 					z_is_on_source_foil[i].push_back(z_is_on_source_foil[j][0]);
 					x_is_on_main_calorimeter[i].push_back(x_is_on_main_calorimeter[j][0]);
 					y_is_on_main_calorimeter[i].push_back(y_is_on_main_calorimeter[j][0]);
 					z_is_on_main_calorimeter[i].push_back(z_is_on_main_calorimeter[j][0]);
 					x_is_on_x_calorimeter[i].push_back(x_is_on_x_calorimeter[j][0]);
-						
 					y_is_on_x_calorimeter[i].push_back(y_is_on_x_calorimeter[j][0]);
 					z_is_on_x_calorimeter[i].push_back(z_is_on_x_calorimeter[j][0]);
 					x_is_on_gamma_veto[i].push_back(x_is_on_gamma_veto[j][0]);
 					y_is_on_gamma_veto[i].push_back(y_is_on_gamma_veto[j][0]);
 					z_is_on_gamma_veto[i].push_back(z_is_on_gamma_veto[j][0]);
-						
 					x_is_on_wire[i].push_back(x_is_on_wire[j][0]);
 					y_is_on_wire[i].push_back(y_is_on_wire[j][0]);
 					z_is_on_wire[i].push_back(z_is_on_wire[j][0]);
-						
 					x_is_in_gas[i].push_back(x_is_in_gas[j][0]);
 					y_is_in_gas[i].push_back(y_is_in_gas[j][0]);
 					z_is_in_gas[i].push_back(z_is_in_gas[j][0]);
@@ -3109,13 +3513,9 @@ dpp::chain_module::process_status falaise_skeleton_module_ptd::process (datatool
 
 				}
 			}
-		} 
-		*/
-		// KEEP UND INFORMATIONS OF ELEC CROSSING ==> GONA USE TAG FROM UND USED ! :) 
-
+		}  */
 		
-		
-
+		// KEEP UND INFORMATIONS OF ELEC CROSSING ==> GONA USE TAG FROM UND USED ! :) 				
 		if((evt_isolated_calo == true || tracks_with_associated_calo==true || tracks_without_associated_calo == true) && saving_file == true){  
 			tree->Fill();
       	}
